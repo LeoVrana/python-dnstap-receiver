@@ -185,6 +185,12 @@ def setup_outputs(cfg, stats, start_shutdown):
         queues_list.append(queue_stdout)
         loop.create_task(output_stdout.handle(conf["stdout"], queue_stdout, stats, start_shutdown))
 
+    if conf.get("stdout-router", {}).get("enable", False):
+        if not output_stdout_router.checking_conf(cfg=conf["stdout-router"]): return
+        queue_stdout_router = asyncio.Queue()
+        queues_list.append(queue_stdout_router)
+        loop.create_task(output_stdout_router.handle(conf["stdout-router"], queue_stdout, stats, start_shutdown))
+
     if conf["metrics"]["enable"]:
         if not output_metrics.checking_conf(cfg=conf["metrics"]): return
         queue_metrics = asyncio.Queue()
