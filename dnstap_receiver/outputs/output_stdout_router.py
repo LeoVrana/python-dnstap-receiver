@@ -7,6 +7,11 @@ tap_logger = logging.getLogger("dnstap_receiver.output.stdout")
 
 from dnstap_receiver.outputs import transform
 
+def checking_conf(cfg):
+    """validate the config"""
+    clogger.debug("Output handler: stdout")
+    return True
+
 class FakeProducer:
     """
     config needs: 
