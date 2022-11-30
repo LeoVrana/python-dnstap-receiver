@@ -4,6 +4,8 @@ import asyncio
 import yaml
 import signal
 import sys
+import json
+import time
 
 import ssl
 import pkgutil
@@ -22,6 +24,7 @@ from dnstap_receiver.inputs import input_tcpclient
 
 # import all outputs
 from dnstap_receiver.outputs import output_stdout
+from dnstap_receiver.outputs import output_stdout_router
 from dnstap_receiver.outputs import output_file
 from dnstap_receiver.outputs import output_syslog
 from dnstap_receiver.outputs import output_tcp
@@ -38,6 +41,31 @@ from dnstap_receiver import statistics
 DFLT_LISTEN_IP = "0.0.0.0"
 DFLT_LISTEN_PORT = 6000
 
+TEST_MSG_1 = {
+    "identity": "res310.xsjc2.OHAAAAAI", 
+    "qname": "dom1.com.", 
+    "rrtype": "AAAA", 
+    "query-ip": "::1", 
+    "query-port": 36817, 
+    "response-ip": "::1", 
+    "response-port": 53, 
+    "latency": "-", 
+    "message": "CLIENT_RESPONSE", 
+    "family": "INET6", 
+    "protocol": "UDP", 
+    "length": 75, 
+    "timestamp": 1669081561.9376786, 
+    "type": "response", 
+    "rcode": "NOERROR", 
+    "id": 17983, 
+    "datetime": "2022-11-22T01:46:01.937679+00:00"
+}
+
+TEST_MSG_2 = {"identity": "res310.xsjc2.OHAAAAAI", "qname": "whatever.org", "rrtype": "A", "query-ip": "205.207.155.31", "query-port": 56039, "response-ip": "205.207.155.50", "response-port": 53, "latency": "-", "message": "CLIENT_RESPONSE", "family": "INET", "protocol": "UDP", "length": 137, "timestamp": 1669081519.537276, "type": "response", "rcode": "NXDOMAIN", "id": 60643, "datetime": "2022-11-22T01:45:19.537276+00:00"}
+
+TEST_MSGS = [TEST_MSG_1, TEST_MSG_2]
+
+
 # command line arguments definition
 parser = argparse.ArgumentParser()
 parser.add_argument("-l", 
@@ -48,6 +76,7 @@ parser.add_argument("-p", type=int,
                     default=DFLT_LISTEN_PORT)               
 parser.add_argument("-u", help="read dnstap payloads from unix socket")
 parser.add_argument('-v', action='store_true', help="verbose mode")   
+parser.add_argument('-t', action='store_true', help="test mode")   
 parser.add_argument("-c", help="external config file")   
 
 # get event loop
@@ -57,11 +86,10 @@ shutdown_task = None
 def merge_cfg(u, o):
     """merge config"""
     for k,v in u.items():
-        if k in o:
-            if isinstance(v, dict):
-                merge_cfg(u=v,o=o[k])
-            else:
-                o[k] = v
+        if k in o and isinstance(v, dict):
+            merge_cfg(u=v,o=o[k])
+        else:
+            o[k] = v
 
 def load_yaml(f):
     """load yaml file"""
@@ -82,7 +110,10 @@ def setup_config(args):
     cfg = load_yaml(f)
 
     # Overwrites then with the external file ?    
-    if args.c:
+    if args.c and pathlib.Path(args.c).suffix == ".json":
+        cfg_ext = json.load(open(args.c, "r"))
+        merge_cfg(u=cfg_ext,o=cfg)
+    elif args.c:
         cfg_ext = load_yaml(open(args.c, 'r'))
         merge_cfg(u=cfg_ext,o=cfg)
 
@@ -130,25 +161,25 @@ def setup_outputs(cfg, stats, start_shutdown):
     conf = cfg["output"]
 
     queues_list = []
-    if conf["syslog"]["enable"]:
+    if conf.get("syslog", {}).get("enable", False):
         if not output_syslog.checking_conf(cfg=conf["syslog"]): return
         queue_syslog = asyncio.Queue()
         queues_list.append(queue_syslog)
         loop.create_task(output_syslog.handle(conf["syslog"], queue_syslog, stats, start_shutdown))
 
-    if conf["tcp-socket"]["enable"]:
+    if conf.get("tcp-socket", {}).get("enable", False):
         if not output_tcp.checking_conf(cfg=conf["tcp-socket"]): return
         queue_tcpsocket = asyncio.Queue()
         queues_list.append(queue_tcpsocket)
         loop.create_task(output_tcp.handle(conf["tcp-socket"], queue_tcpsocket, stats, start_shutdown))
                                                
-    if conf["file"]["enable"]:
+    if conf.get("file", {}).get("enable", False):
         if not output_file.checking_conf(cfg=conf["file"]): return
         queue_file = asyncio.Queue()
         queues_list.append(queue_file)
         loop.create_task(output_file.handle(conf["file"], queue_file, stats, start_shutdown))
                                               
-    if conf["stdout"]["enable"]:
+    if conf.get("stdout", {}).get("enable", False):
         if not output_stdout.checking_conf(cfg=conf["stdout"]): return
         queue_stdout = asyncio.Queue()
         queues_list.append(queue_stdout)
@@ -160,31 +191,38 @@ def setup_outputs(cfg, stats, start_shutdown):
         queues_list.append(queue_metrics)
         loop.create_task(output_metrics.handle(conf["metrics"], queue_metrics, stats, start_shutdown))
 
-    if conf["dnstap"]["enable"]:
+    if conf.get("dnstap", {}).get("enable", False):
         if not output_dnstap.checking_conf(cfg=conf["dnstap"]): return
         queue_dnstap = asyncio.Queue()
         queues_list.append(queue_dnstap)
         loop.create_task(output_dnstap.handle(conf["dnstap"], queue_dnstap, stats, start_shutdown))
 
-    if conf["kafka"]["enable"]:
+    if conf.get("kafka", {}).get("enable", False):
         if not output_kafka.checking_conf(cfg=conf["kafka"]): return
         queue_kafka = asyncio.Queue()
         queues_list.append(queue_kafka)
         loop.create_task(output_kafka.handle(conf["kafka"], queue_kafka, stats, start_shutdown))
 
-    if conf["pgsql"]["enable"]:
+    ## Adding support for logging to multiple kafka topics.
+    if conf["kafka-router"]["enable"]:
+        if not output_dnstap.checking_conf(cfg=conf["kafka-router"]): return
+        queue_kafka_router = asyncio.Queue()
+        queues_list.append(queue_kafka_router)
+        loop.create_task(output_kafka_router.handle(conf["kafka-router"], queue_kafka_router, stats, start_shutdown))
+
+    if conf.get("pgsql", {}).get("enable", False):
         if not output_pgsql.checking_conf(cfg=conf["pgsql"]): return
         queue_pgsql = asyncio.Queue()
         queues_list.append(queue_pgsql)
         loop.create_task(output_pgsql.handle(conf["pgsql"], queue_pgsql, stats, start_shutdown))
 
-    if conf["rabbitmq"]["enable"]:
+    if conf.get("rabbitmq", {}).get("enable", False):
         if not output_rabbitmq.checking_conf(cfg=conf["rabbitmq"]): return
         queue_rabbitmq = asyncio.Queue()
         queues_list.append(queue_rabbitmq)
         loop.create_task(output_rabbitmq.handle(conf["rabbitmq"], queue_rabbitmq, stats, start_shutdown))
 
-    if conf["elasticsearch"]["enable"]:
+    if conf.get("elasticsearch", {}).get("enable", False):
         if not output_elasticsearch.checking_conf(cfg=conf["elasticsearch"]): return
         queue_elasticsearch = asyncio.Queue()
         queues_list.append(queue_elasticsearch)
@@ -198,17 +236,17 @@ def setup_inputs(cfg, queues_outputs, stats, geoip_reader, start_shutdown):
     cfg_input = cfg["input"]
     
     # asynchronous unix 
-    if cfg_input["unix-socket"]["enable"]:
+    if cfg_input.get("unix-socket", {}).get("enable", False):
         loop.create_task(input_socket.start_unixsocket(cfg, queues_outputs, stats, geoip_reader, cache, start_shutdown))
         
     # sniffer
-    elif cfg_input["sniffer"]["enable"]:
+    elif cfg_input.get("sniffer", {}).get("enable", False):
         queue_sniffer = asyncio.Queue()
         loop.create_task(input_sniffer.watch_buffer(cfg_input["sniffer"], queue_sniffer, queues_outputs, stats, cache, start_shutdown))
         loop.run_in_executor(None, input_sniffer.start_input, cfg_input["sniffer"], queue_sniffer, start_shutdown)
     
     # tcp client input
-    elif cfg_input["tcp-client"]["enable"]:
+    elif cfg_input.get("tcp-client", {}).get("enable", False):
         loop.create_task(input_socket.start_tcpclient(cfg, queues_outputs, stats, geoip_reader, cache, start_shutdown))
         
     # default one tcp socket
@@ -297,14 +335,28 @@ def start_receiver():
 
     # start the http api
     setup_webserver(cfg, stats)
-        
-    # run event loop 
-    try:
-       loop.run_forever()
-    finally:
-        clogger.info("exiting, please wait..")
+
+    # if test, send one message in and then quit
+    if args.t:
+        clogger.info("test condition indicated. testing 2 dns messages for loggers.")
+
+        for tm in TEST_MSGS:
+            print(f"\nPutting tm in queue: {tm}\n")
+            for q in queues_outputs:
+                q.put_nowait(tm.copy())
+
+        loop.run_forever()
+                
         loop.close()
-        clogger.debug("shut down eventloop")
+                
+    else:
+        # run event loop 
+        try:
+            loop.run_forever()
+        finally:
+            clogger.info("exiting, please wait..")
+            loop.close()
+            clogger.debug("shut down eventloop")
 
     # close geoip
     if geoip_reader is not None: geoip_reader.close()

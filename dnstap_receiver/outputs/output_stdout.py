@@ -39,7 +39,11 @@ async def handle(output_cfg, queue, metrics, start_shutdown):
             continue
         
         # convert dnstap message
-        msg = transform.convert_dnstap(fmt=output_cfg["format"], tapmsg=tapmsg)
+        msg = transform.convert_dnstap(fmt=output_cfg["format"], tapmsg=tapmsg, cfg=output_cfg)
+        
+        ## NEW: If transform returns none, that means it should not be converted to this.
+        if not msg:
+            continue
         
         # print to stdout
         tap_logger.info(msg.decode())

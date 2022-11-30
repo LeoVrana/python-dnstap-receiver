@@ -2,10 +2,43 @@ import json
 import yaml
 
 from datetime import datetime, timezone
+from tld import get_tld
+from tld.exceptions import TldBadUrl
 
-def convert_dnstap(fmt, tapmsg):
-    """convert dnstap message"""
+def processed_qname(qname: str) -> str:
+    if qname[-1] == ".":
+        qname = qname[:-1]
+        
+    try:
+        if not qname.startswith("http"):
+            dom_obj = get_tld(f"http://{qname}", as_object=True)
+        else:
+            dom_obj = get_tld(qname, as_object=True)
+    except:
+        print(f"Error in parsing qname: {qname}")
+        return ""
+
+    if dom_obj.subdomain:
+        dom = ".".join([dom_obj.subdomain, dom_obj.domain, dom_obj.tld])
+    else:
+        dom = ".".join([dom_obj.domain, dom_obj.tld])
+    
+    return dom
+
+def remove_ip_info(tapmsg) -> dict:
+    tapmsg["query-ip"] = "..."
+    return tapmsg
+            
+def convert_dnstap(fmt: str, tapmsg: dict, cfg: dict={}):
+    """
+    convert dnstap message:
+    takes msg and transformer class and then
+    """
     tapmsg["datetime"] = datetime.fromtimestamp(tapmsg["timestamp"], tz=timezone.utc).isoformat()
+
+    ## Get the full config for the logger. If hide query IP, then scrub it.
+    if cfg.get("transforms", {}).get("hide-query-ip", False):
+        tapmsg = remove_ip_info(tapmsg) 
 
     if fmt == "text":
         msg_list = []
@@ -33,7 +66,9 @@ def convert_dnstap(fmt, tapmsg):
         
     elif fmt == "json":
         # delete some unneeded keys
-        del tapmsg["payload"]; del tapmsg["time-sec"]; del tapmsg["time-nsec"];
+        tapmsg.pop("payload", None)
+        # tapmsg.pop("time-sec")
+        # tapmsg.pop("time-nsec")
         
         msg = json.dumps(tapmsg)
         return msg.encode()
